@@ -7,18 +7,28 @@ cloudinary.config({
   api_secret: process.env.CLOUDINARY_API_SECRET,
 });
 
-const storage = new CloudinaryStorage({
+// PDFs / relatórios
+const storagePdf = new CloudinaryStorage({
   cloudinary,
-  params: async (req, file) => {
-    return {
-      folder: 'relatorios_projetos',
-      resource_type: 'raw', // garante que PDFs e outros arquivos não-imagem sejam aceitos
-      public_id: file.originalname.replace(/\.[^/.]+$/, '') // nome sem extensão
-    };
-  },
+  params: async (req, file) => ({
+    folder: 'relatorios_projetos',
+    resource_type: 'raw',
+    public_id: file.originalname.replace(/\.[^/.]+$/, '')
+  }),
+});
+
+// Logos / imagens
+const storageLogo = new CloudinaryStorage({
+  cloudinary,
+  params: async (req, file) => ({
+    folder: 'logos_escolas',
+    resource_type: 'image',
+    public_id: file.originalname.replace(/\.[^/.]+$/, '')
+  }),
 });
 
 module.exports = {
   cloudinary,
-  storage
+  storagePdf,
+  storageLogo
 };
