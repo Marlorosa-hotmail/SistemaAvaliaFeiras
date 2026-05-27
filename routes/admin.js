@@ -837,7 +837,7 @@ const mensagens = await Mensagem.find({ autorId: req.session.adminEscola.id })
 // ===========================================
 
 // Criar Projeto (POST)
-router.post('/projetos', verificarAdminEscola, upload.single('relatorioPdf'), async (req, res) => {
+router.post('/projetos', verificarAdminEscola, uploadPdf.single('relatorioPdf'), async (req, res) => {
   try {
     const { titulo, descricao, turma, alunos, categoria, criterios, orientador, coorientador } = req.body;
     const adminEscolaId = req.session.adminEscola.escolaId;
@@ -875,7 +875,7 @@ router.post('/projetos', verificarAdminEscola, upload.single('relatorioPdf'), as
 });
 
 // Editar Projeto (PUT)
-router.post('/projetos/:id/editar', verificarAdminEscola, upload.single('relatorioPdf'), async (req, res) => {
+router.post('/projetos/:id/editar', verificarAdminEscola, uploadPdf.single('relatorioPdf'), async (req, res) => {
   const { id } = req.params;
   const { titulo, descricao, categoria, turma, alunos, criterios, orientador, coorientador } = req.body;
   const adminEscolaId = req.session.adminEscola.escolaId;
@@ -2619,7 +2619,7 @@ router.post('/configuracoes/feiradata', verificarAdminEscola, async (req, res) =
 });
 
 // Atualizar dados da escola (POST)
-router.post('/escola/atualizar', verificarAdminEscola, upload.single('logo'), async (req, res) => {
+router.post('/escola/atualizar', verificarAdminEscola, uploadLogo.single('logo'), async (req, res) => {
   const escolaId = req.session.adminEscola.escolaId;
   const { nome, telefone, endereco } = req.body;
 
