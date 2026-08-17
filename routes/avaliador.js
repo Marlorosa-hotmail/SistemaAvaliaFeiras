@@ -3,33 +3,38 @@
 const express = require('express');
 const router = express.Router();
 
+const mongoose = require('mongoose');
+
 const Avaliador = require('../models/Avaliador');
 const Projeto = require('../models/Projeto');
 const Avaliacao = require('../models/Avaliacao');
 const Criterio = require('../models/Criterio');
 const Feira = require('../models/Feira');
 const Escola = require('../models/Escola');
-const QRCode = require('qrcode');
 const Feedback = require('../models/Feedback');
 
+const QRCode = require('qrcode');
+
 
 // ============================================================
-// MIDDLEWARE - VERIFICAR SESSÃO DO AVALIADOR
+// MIDDLEWARE
 // ============================================================
 
+// Verifica sessão do avaliador e se o avaliador continua ativo
 async function verificarAvaliador(req, res, next) {
-    if (res.headersSent) {
-        console.warn('Headers já enviados em verificarAvaliador, abortando.');
-        return;
-    }
-
     try {
+        if (res.headersSent) {
+            console.warn('Headers já enviados em verificarAvaliador, abortando.');
+            return;
+        }
+
         if (req.session && req.session.avaliador) {
             const avaliador = await Avaliador.findById(
                 req.session.avaliador.id
             );
 
             if (avaliador && avaliador.ativo) {
+                // Disponibiliza o avaliador completo para as rotas
                 res.locals.avaliador = avaliador;
                 return next();
             }
@@ -43,7 +48,7 @@ async function verificarAvaliador(req, res, next) {
         return res.redirect('/avaliador/login');
 
     } catch (err) {
-        console.error('Erro ao verificar avaliador:', err);
+        console.error('Erro no middleware verificarAvaliador:', err);
 
         if (!res.headersSent) {
             req.flash(
@@ -61,6 +66,7 @@ async function verificarAvaliador(req, res, next) {
 // LOGIN
 // ============================================================
 
+// Tela de login via PIN
 router.get('/login', (req, res) => {
     res.render('avaliador/login', {
         titulo: 'Login do Avaliador',
@@ -71,10 +77,7 @@ router.get('/login', (req, res) => {
 });
 
 
-// ============================================================
-// VALIDAÇÃO DO PIN
-// ============================================================
-
+// Validação do PIN
 router.post('/login', async (req, res) => {
     const { pin } = req.body;
 
@@ -93,6 +96,7 @@ router.post('/login', async (req, res) => {
             return res.redirect('/avaliador/login');
         }
 
+        // Salva somente os dados necessários na sessão
         req.session.avaliador = {
             id: avaliador._id,
             nome: avaliador.nome,
@@ -108,16 +112,12 @@ router.post('/login', async (req, res) => {
         return res.redirect('/avaliador/dashboard');
 
     } catch (err) {
-        console.error(
-            'Erro no login do avaliador:',
-            err
-        );
+        console.error('Erro no login do avaliador:', err);
 
         if (!res.headersSent) {
             req.flash(
                 'error_msg',
-                'Erro ao tentar autenticar. Detalhes: ' +
-                err.message
+                'Erro ao tentar autenticar. Detalhes: ' + err.message
             );
 
             return res.redirect('/avaliador/login');
@@ -136,86 +136,121 @@ router.get('/dashboard', verificarAvaliador, async (req, res) => {
     try {
         const avaliadorData = res.locals.avaliador;
 
-        // Carrega os projetos atribuídos
+        // Popula os projetos atribuídos
         await avaliadorData.populate('projetosAtribuidos');
 
         /*
          * IMPORTANTE:
          *
-         * Não usamos mais os critérios da feira para determinar
-         * se um projeto foi avaliado.
+         * NÃO usamos mais:
          *
-         * Cada projeto possui sua própria lista:
+         * Criterio.find({
+         *     feira: feira,
+         *     escolaId: escolaId
+         * })
+         *
+         * para descobrir quantos critérios um projeto possui.
+         *
+         * Cada projeto possui seu próprio array:
          *
          * projeto.criterios
          *
-         * Portanto:
-         *
-         * Projeto A -> 1 critério
-         * Projeto B -> 3 critérios
-         * Projeto C -> 6 critérios
+         * Portanto, cada projeto é tratado individualmente.
          */
 
         const projetosComStatus = await Promise.all(
-            avaliadorData.projetosAtribuidos.map(
-                async projeto => {
+            avaliadorData.projetosAtribuidos.map(async (projeto) => {
 
-                    const avaliacao = await Avaliacao.findOne({
-                        avaliador: avaliadorData._id,
-                        projeto: projeto._id
-                    });
+                // ------------------------------------------------
+                // CRITÉRIOS DO PROJETO
+                // ------------------------------------------------
 
-                    const totalCriterios =
-                        Array.isArray(projeto.criterios)
-                            ? projeto.criterios.length
-                            : 0;
+                const criteriosDoProjeto = Array.isArray(projeto.criterios)
+                    ? projeto.criterios
+                    : [];
 
-                    let criteriosAvaliadosComNota = 0;
+                const totalCriteriosProjeto =
+                    criteriosDoProjeto.length;
 
-                    if (avaliacao && Array.isArray(avaliacao.itens)) {
-                        criteriosAvaliadosComNota =
-                            avaliacao.itens.filter(
-                                item =>
-                                    item.nota !== undefined &&
-                                    item.nota !== null &&
-                                    item.nota >= 5 &&
-                                    item.nota <= 10
-                            ).length;
-                    }
 
-                    let statusAvaliacao = 'Pendente';
-                    let corStatus = 'text-yellow-600';
+                // ------------------------------------------------
+                // BUSCA A AVALIAÇÃO DESTE PROJETO
+                // ------------------------------------------------
 
-                    if (totalCriterios === 0) {
-                        if (avaliacao) {
-                            statusAvaliacao = 'Avaliado';
-                            corStatus = 'text-green-600';
-                        }
-                    } else if (
-                        criteriosAvaliadosComNota === totalCriterios
-                    ) {
+                const avaliacao = await Avaliacao.findOne({
+                    avaliador: avaliadorData._id,
+                    projeto: projeto._id
+                });
+
+
+                // ------------------------------------------------
+                // STATUS
+                // ------------------------------------------------
+
+                let statusAvaliacao = 'Pendente';
+                let corStatus = 'text-yellow-600';
+
+                let criteriosAvaliadosComNota = 0;
+
+                if (avaliacao && Array.isArray(avaliacao.itens)) {
+
+                    criteriosAvaliadosComNota =
+                        avaliacao.itens.filter(item =>
+                            item.nota !== undefined &&
+                            item.nota !== null &&
+                            item.nota >= 5 &&
+                            item.nota <= 10
+                        ).length;
+                }
+
+
+                // Projeto sem critérios
+                if (totalCriteriosProjeto === 0) {
+
+                    if (avaliacao) {
                         statusAvaliacao = 'Avaliado';
                         corStatus = 'text-green-600';
-                    } else if (
-                        criteriosAvaliadosComNota > 0
+                    }
+
+                } else {
+
+                    // Todos os critérios do projeto foram avaliados
+                    if (
+                        criteriosAvaliadosComNota ===
+                        totalCriteriosProjeto
                     ) {
+
+                        statusAvaliacao = 'Avaliado';
+                        corStatus = 'text-green-600';
+
+                    // Pelo menos um critério foi avaliado
+                    } else if (criteriosAvaliadosComNota > 0) {
+
                         statusAvaliacao = 'Em Processo';
                         corStatus = 'text-orange-600';
                     }
-
-                    return {
-                        ...projeto.toObject(),
-
-                        statusAvaliacao,
-
-                        corStatus,
-
-                        avaliadoPorAvaliador:
-                            statusAvaliacao === 'Avaliado'
-                    };
                 }
-            )
+
+
+                return {
+                    ...projeto.toObject(),
+
+                    statusAvaliacao,
+
+                    corStatus,
+
+                    avaliadoPorAvaliador:
+                        statusAvaliacao === 'Avaliado',
+
+                    // Informações extras úteis para a view
+                    totalCriterios: totalCriteriosProjeto,
+
+                    criteriosAvaliados:
+                        criteriosAvaliadosComNota
+                };
+            })
         );
+
 
         const todosProjetosAvaliados =
             projetosComStatus.length > 0 &&
@@ -223,6 +258,7 @@ router.get('/dashboard', verificarAvaliador, async (req, res) => {
                 projeto =>
                     projeto.statusAvaliacao === 'Avaliado'
             );
+
 
         res.render('avaliador/dashboard', {
             titulo: 'Meus Projetos',
@@ -241,12 +277,14 @@ router.get('/dashboard', verificarAvaliador, async (req, res) => {
         });
 
     } catch (err) {
+
         console.error(
             'Erro ao carregar projetos do avaliador:',
             err
         );
 
         if (!res.headersSent) {
+
             req.flash(
                 'error_msg',
                 'Erro ao carregar seus projetos. Detalhes: ' +
@@ -260,7 +298,7 @@ router.get('/dashboard', verificarAvaliador, async (req, res) => {
 
 
 // ============================================================
-// TELA DE AVALIAÇÃO DE UM PROJETO
+// TELA DE AVALIAÇÃO DO PROJETO
 // ============================================================
 
 router.get(
@@ -271,19 +309,42 @@ router.get(
         if (res.headersSent) return;
 
         try {
+
             const { projetoId } = req.params;
 
             const avaliadorData =
                 res.locals.avaliador;
 
-            /*
-             * Busca o projeto.
-             *
-             * Não buscamos os critérios diretamente pela feira.
-             */
-            const projeto = await Projeto.findById(
-                projetoId
-            ).lean();
+
+            // ------------------------------------------------
+            // VALIDA ID
+            // ------------------------------------------------
+
+            if (
+                !projetoId ||
+                !mongoose.Types.ObjectId.isValid(projetoId)
+            ) {
+
+                req.flash(
+                    'error_msg',
+                    'ID do projeto inválido.'
+                );
+
+                return res.redirect('/avaliador/dashboard');
+            }
+
+
+            // ------------------------------------------------
+            // BUSCA PROJETO
+            // ------------------------------------------------
+
+            const projeto =
+                await Projeto.findById(projetoId).lean();
+
+
+            // ------------------------------------------------
+            // VALIDA ESCOLA E FEIRA
+            // ------------------------------------------------
 
             if (
                 !projeto ||
@@ -292,51 +353,70 @@ router.get(
                 String(projeto.feira) !==
                     String(avaliadorData.feira)
             ) {
+
                 req.flash(
                     'error_msg',
-                    'Projeto não encontrado ou não pertence à sua escola/feira, ou não está atribuído a você.'
+                    'Projeto não encontrado ou não pertence à sua escola/feira.'
                 );
 
-                return res.redirect(
-                    '/avaliador/dashboard'
-                );
+                return res.redirect('/avaliador/dashboard');
             }
 
-            /*
-             * =====================================================
-             * CORREÇÃO PRINCIPAL
-             * =====================================================
-             *
-             * O projeto possui sua própria lista de critérios:
-             *
-             * projeto.criterios
-             *
-             * Portanto NÃO fazemos:
-             *
-             * Criterio.find({ feira: projeto.feira })
-             *
-             * pois isso retornaria TODOS os critérios da feira.
-             */
 
-            const criteriosDoProjeto =
+            // ------------------------------------------------
+            // VERIFICA SE O PROJETO ESTÁ ATRIBUÍDO AO AVALIADOR
+            // ------------------------------------------------
+
+            const projetoAtribuido =
+                await Avaliador.exists({
+                    _id: avaliadorData._id,
+                    projetosAtribuidos: projeto._id
+                });
+
+            if (!projetoAtribuido) {
+
+                req.flash(
+                    'error_msg',
+                    'Este projeto não está atribuído a você.'
+                );
+
+                return res.redirect('/avaliador/dashboard');
+            }
+
+
+            // =================================================
+            // CORREÇÃO PRINCIPAL
+            //
+            // BUSCAR SOMENTE OS CRITÉRIOS DO PROJETO
+            // =================================================
+
+            const idsCriteriosProjeto =
                 Array.isArray(projeto.criterios)
                     ? projeto.criterios
                     : [];
 
-            const criterios =
-                criteriosDoProjeto.length > 0
-                    ? await Criterio.find({
-                        _id: {
-                            $in: criteriosDoProjeto
-                        },
-                        feira: projeto.feira,
-                        escolaId: projeto.escolaId
-                    }).sort('nome').lean()
-                    : [];
 
-            /*
-             * Busca avaliação existente.
-             */
+            const criterios = await Criterio.find({
+
+                // SOMENTE critérios vinculados ao projeto
+                _id: {
+                    $in: idsCriteriosProjeto
+                },
+
+                // Segurança adicional
+                feira: projeto.feira,
+
+                escolaId: projeto.escolaId
+
+            }).sort({
+                nome: 1
+            }).lean();
+
+
+            // ------------------------------------------------
+            // BUSCA AVALIAÇÃO EXISTENTE
+            // ------------------------------------------------
+
             const avaliacaoExistente =
                 await Avaliacao.findOne({
                     avaliador: avaliadorData._id,
@@ -345,31 +425,32 @@ router.get(
                     escolaId: projeto.escolaId
                 }).populate('itens.criterio');
 
-            res.render(
-                'avaliador/avaliar_projeto',
-                {
-                    titulo:
-                        `Avaliar: ${projeto.titulo}`,
 
-                    projeto,
+            // ------------------------------------------------
+            // RENDER
+            // ------------------------------------------------
 
-                    criterios,
+            res.render('avaliador/avaliar_projeto', {
 
-                    avaliador:
-                        avaliadorData,
+                titulo:
+                    `Avaliar: ${projeto.titulo}`,
 
-                    avaliacaoExistente,
+                projeto,
 
-                    layout:
-                        'layouts/public',
+                criterios,
 
-                    error_msg:
-                        req.flash('error_msg'),
+                avaliador: avaliadorData,
 
-                    success_msg:
-                        req.flash('success_msg')
-                }
-            );
+                avaliacaoExistente,
+
+                layout: 'layouts/public',
+
+                error_msg:
+                    req.flash('error_msg'),
+
+                success_msg:
+                    req.flash('success_msg')
+            });
 
         } catch (err) {
 
@@ -379,15 +460,14 @@ router.get(
             );
 
             if (!res.headersSent) {
+
                 req.flash(
                     'error_msg',
                     'Erro ao carregar a página de avaliação do projeto. Detalhes: ' +
                     err.message
                 );
 
-                return res.redirect(
-                    '/avaliador/dashboard'
-                );
+                return res.redirect('/avaliador/dashboard');
             }
         }
     }
@@ -406,6 +486,7 @@ router.post(
         const { projetoId } = req.params;
 
         try {
+
             const avaliadorData =
                 res.locals.avaliador;
 
@@ -413,7 +494,13 @@ router.post(
                 criterios: criteriosRecebidos
             } = req.body;
 
+
+            // ------------------------------------------------
+            // VERIFICA SE O AVALIADOR JÁ FINALIZOU
+            // ------------------------------------------------
+
             if (avaliadorData.statusAvaliacaoGeral) {
+
                 req.flash(
                     'error_msg',
                     'Suas avaliações já foram finalizadas. Não é possível editar.'
@@ -424,13 +511,38 @@ router.post(
                 );
             }
 
-            /*
-             * Busca o projeto.
-             */
+
+            // ------------------------------------------------
+            // VALIDA ID
+            // ------------------------------------------------
+
+            if (
+                !projetoId ||
+                !mongoose.Types.ObjectId.isValid(projetoId)
+            ) {
+
+                req.flash(
+                    'error_msg',
+                    'ID do projeto inválido.'
+                );
+
+                return res.redirect(
+                    '/avaliador/dashboard'
+                );
+            }
+
+
+            // ------------------------------------------------
+            // BUSCA PROJETO
+            // ------------------------------------------------
+
             const projeto =
-                await Projeto.findById(
-                    projetoId
-                ).lean();
+                await Projeto.findById(projetoId).lean();
+
+
+            // ------------------------------------------------
+            // VALIDA ESCOLA E FEIRA
+            // ------------------------------------------------
 
             if (
                 !projeto ||
@@ -439,9 +551,10 @@ router.post(
                 String(projeto.feira) !==
                     String(avaliadorData.feira)
             ) {
+
                 req.flash(
                     'error_msg',
-                    'Projeto não encontrado ou não pertence à sua escola/feira, ou não está atribuído a você.'
+                    'Projeto não encontrado ou não pertence à sua escola/feira.'
                 );
 
                 return res.redirect(
@@ -449,34 +562,62 @@ router.post(
                 );
             }
 
-            /*
-             * =====================================================
-             * CRITÉRIOS OFICIAIS DO PROJETO
-             * =====================================================
-             */
 
-            const criteriosDoProjeto =
+            // ------------------------------------------------
+            // VERIFICA SE PROJETO ESTÁ ATRIBUÍDO
+            // ------------------------------------------------
+
+            const projetoAtribuido =
+                await Avaliador.exists({
+                    _id: avaliadorData._id,
+                    projetosAtribuidos: projeto._id
+                });
+
+            if (!projetoAtribuido) {
+
+                req.flash(
+                    'error_msg',
+                    'Este projeto não está atribuído a você.'
+                );
+
+                return res.redirect(
+                    '/avaliador/dashboard'
+                );
+            }
+
+
+            // =================================================
+            // CRITÉRIOS OFICIAIS DO PROJETO
+            //
+            // IMPORTANTE:
+            // NÃO pegar todos os critérios da feira.
+            // =================================================
+
+            const idsCriteriosProjeto =
                 Array.isArray(projeto.criterios)
                     ? projeto.criterios
                     : [];
 
+
             const criteriosOficiais =
-                criteriosDoProjeto.length > 0
-                    ? await Criterio.find({
-                        _id: {
-                            $in: criteriosDoProjeto
-                        },
-                        feira: projeto.feira,
-                        escolaId: projeto.escolaId
-                    })
-                    : [];
+                await Criterio.find({
 
-            /*
-             * Cria um Set para validar rapidamente
-             * quais critérios pertencem ao projeto.
-             */
+                    _id: {
+                        $in: idsCriteriosProjeto
+                    },
 
-            const criteriosPermitidos =
+                    feira: projeto.feira,
+
+                    escolaId: projeto.escolaId
+
+                }).lean();
+
+
+            // ------------------------------------------------
+            // MAPA DOS CRITÉRIOS VÁLIDOS
+            // ------------------------------------------------
+
+            const criteriosValidos =
                 new Set(
                     criteriosOficiais.map(
                         criterio =>
@@ -484,9 +625,55 @@ router.post(
                     )
                 );
 
-            /*
-             * Busca avaliação existente.
-             */
+
+            // =================================================
+            // BLOQUEIA CRITÉRIOS QUE NÃO PERTENCEM AO PROJETO
+            // =================================================
+
+            if (criteriosRecebidos) {
+
+                const idsRecebidos =
+                    Object.keys(criteriosRecebidos);
+
+                const criterioInvalido =
+                    idsRecebidos.find(
+                        criterioId =>
+                            !criteriosValidos.has(
+                                String(criterioId)
+                            )
+                    );
+
+                if (criterioInvalido) {
+
+                    console.warn(
+                        'Tentativa de enviar critério que não pertence ao projeto:',
+                        {
+                            avaliador:
+                                avaliadorData._id,
+
+                            projeto:
+                                projeto._id,
+
+                            criterio:
+                                criterioInvalido
+                        }
+                    );
+
+                    req.flash(
+                        'error_msg',
+                        'Foi enviado um critério que não pertence a este projeto.'
+                    );
+
+                    return res.redirect(
+                        `/avaliador/avaliar/${projetoId}`
+                    );
+                }
+            }
+
+
+            // ------------------------------------------------
+            // BUSCA AVALIAÇÃO EXISTENTE
+            // ------------------------------------------------
 
             let avaliacaoExistente =
                 await Avaliacao.findOne({
@@ -496,14 +683,16 @@ router.post(
                     escolaId: projeto.escolaId
                 });
 
-            /*
-             * Se não existir, cria uma avaliação nova.
-             */
+
+            // ------------------------------------------------
+            // CRIA NOVA AVALIAÇÃO
+            // ------------------------------------------------
 
             if (!avaliacaoExistente) {
 
                 avaliacaoExistente =
                     new Avaliacao({
+
                         avaliador:
                             avaliadorData._id,
 
@@ -520,29 +709,22 @@ router.post(
                     });
             }
 
-            /*
-             * =====================================================
-             * LIMPA ITENS QUE NÃO PERTENCEM MAIS AO PROJETO
-             * =====================================================
-             *
-             * Isso é importante caso uma avaliação tenha sido salva
-             * anteriormente quando o sistema ainda considerava
-             * todos os critérios da feira.
-             */
+
+            // ------------------------------------------------
+            // COPIA ITENS EXISTENTES
+            // ------------------------------------------------
 
             const novosItensAvaliacao =
-                avaliacaoExistente.itens
-                    .filter(
-                        item =>
-                            criteriosPermitidos.has(
-                                String(item.criterio)
-                            )
-                    )
-                    .map(
-                        item => ({
-                            ...item.toObject()
-                        })
-                    );
+                avaliacaoExistente.itens.map(
+                    item => ({
+                        ...item.toObject()
+                    })
+                );
+
+
+            // ------------------------------------------------
+            // MAPA DOS ITENS EXISTENTES
+            // ------------------------------------------------
 
             const novosItensMap =
                 new Map(
@@ -554,40 +736,41 @@ router.post(
                     )
                 );
 
-            /*
-             * =====================================================
-             * PROCESSA SOMENTE OS CRITÉRIOS DO PROJETO
-             * =====================================================
-             */
 
-            for (
-                const criterio
-                of criteriosOficiais
-            ) {
+            // =================================================
+            // PROCESSA SOMENTE OS CRITÉRIOS DO PROJETO
+            // =================================================
+
+            for (const criterio of criteriosOficiais) {
 
                 const criterioId =
                     String(criterio._id);
 
+
                 const dadosRecebidosParaCriterio =
                     criteriosRecebidos
-                        ? criteriosRecebidos[
-                            criterioId
-                        ]
+                        ? criteriosRecebidos[criterioId]
                         : undefined;
+
+
+                // ------------------------------------------------
+                // CRITÉRIO NÃO ENVIADO
+                // ------------------------------------------------
 
                 if (!dadosRecebidosParaCriterio) {
                     continue;
                 }
 
+
                 const {
                     nota,
                     comentario
-                } =
-                    dadosRecebidosParaCriterio;
+                } = dadosRecebidosParaCriterio;
 
-                /*
-                 * Nota vazia.
-                 */
+
+                // ------------------------------------------------
+                // NOTA VAZIA
+                // ------------------------------------------------
 
                 if (
                     nota === undefined ||
@@ -601,6 +784,7 @@ router.post(
                         );
 
                     if (itemParaAtualizar) {
+
                         itemParaAtualizar.comentario =
                             comentario || '';
                     }
@@ -608,12 +792,18 @@ router.post(
                     continue;
                 }
 
+
+                // ------------------------------------------------
+                // CONVERTE NOTA
+                // ------------------------------------------------
+
                 const notaNum =
                     parseInt(nota, 10);
 
-                /*
-                 * Validação da nota.
-                 */
+
+                // ------------------------------------------------
+                // VALIDA NOTA
+                // ------------------------------------------------
 
                 if (
                     isNaN(notaNum) ||
@@ -631,14 +821,16 @@ router.post(
                     );
                 }
 
-                /*
-                 * Atualiza item existente.
-                 */
+
+                // ------------------------------------------------
+                // ATUALIZA ITEM EXISTENTE
+                // ------------------------------------------------
 
                 const itemParaAtualizar =
                     novosItensMap.get(
                         criterioId
                     );
+
 
                 if (itemParaAtualizar) {
 
@@ -650,11 +842,12 @@ router.post(
 
                 } else {
 
-                    /*
-                     * Cria novo item.
-                     */
+                    // ------------------------------------------------
+                    // ADICIONA NOVO ITEM
+                    // ------------------------------------------------
 
                     novosItensAvaliacao.push({
+
                         criterio:
                             criterio._id,
 
@@ -667,28 +860,27 @@ router.post(
                 }
             }
 
-            /*
-             * =====================================================
-             * GARANTIA EXTRA DE SEGURANÇA
-             * =====================================================
-             *
-             * Mesmo que alguém tente enviar manualmente pelo
-             * navegador um critério que não pertence ao projeto,
-             * ele não será salvo.
-             */
+
+            // =================================================
+            // LIMPA EVENTUAIS ITENS ANTIGOS DE CRITÉRIOS
+            // QUE NÃO PERTENCEM MAIS AO PROJETO
+            //
+            // Isso é importante caso o projeto tenha tido seus
+            // critérios alterados depois de uma avaliação.
+            // =================================================
 
             avaliacaoExistente.itens =
                 novosItensAvaliacao.filter(
                     item =>
-                        criteriosPermitidos.has(
+                        criteriosValidos.has(
                             String(item.criterio)
                         )
                 );
 
-            /*
-             * Marca a avaliação como iniciada/salva
-             * se existir pelo menos uma nota.
-             */
+
+            // ------------------------------------------------
+            // MARCA AVALIAÇÃO COMO INICIADA
+            // ------------------------------------------------
 
             avaliacaoExistente.finalizadaPorAvaliador =
                 avaliacaoExistente.itens.some(
@@ -697,7 +889,13 @@ router.post(
                         item.nota !== null
                 );
 
+
+            // ------------------------------------------------
+            // SALVA
+            // ------------------------------------------------
+
             await avaliacaoExistente.save();
+
 
             req.flash(
                 'success_msg',
@@ -717,18 +915,11 @@ router.post(
 
             if (!res.headersSent) {
 
-                if (
-                    err.name ===
-                    'ValidationError'
-                ) {
+                if (err.name === 'ValidationError') {
 
                     const messages =
-                        Object.values(
-                            err.errors
-                        ).map(
-                            val =>
-                                val.message
-                        );
+                        Object.values(err.errors)
+                            .map(val => val.message);
 
                     req.flash(
                         'error_msg',
@@ -767,9 +958,12 @@ router.post(
             const avaliadorData =
                 res.locals.avaliador;
 
-            if (
-                avaliadorData.statusAvaliacaoGeral
-            ) {
+
+            // ------------------------------------------------
+            // VERIFICA SE JÁ FINALIZOU
+            // ------------------------------------------------
+
+            if (avaliadorData.statusAvaliacaoGeral) {
 
                 req.flash(
                     'error_msg',
@@ -781,40 +975,84 @@ router.post(
                 );
             }
 
-            /*
-             * Carrega projetos atribuídos.
-             */
+
+            // ------------------------------------------------
+            // BUSCA AVALIADOR COM PROJETOS
+            // ------------------------------------------------
 
             const avaliadorCompleto =
                 await Avaliador.findById(
                     avaliadorData._id
-                ).populate(
-                    'projetosAtribuidos'
+                ).populate('projetosAtribuidos');
+
+
+            if (!avaliadorCompleto) {
+
+                req.flash(
+                    'error_msg',
+                    'Avaliador não encontrado.'
                 );
 
+                return res.redirect(
+                    '/avaliador/login'
+                );
+            }
+
+
             const projetosAtribuidos =
-                avaliadorCompleto.projetosAtribuidos;
+                avaliadorCompleto.projetosAtribuidos || [];
+
+
+            // ------------------------------------------------
+            // SEM PROJETOS
+            // ------------------------------------------------
+
+            if (projetosAtribuidos.length === 0) {
+
+                req.flash(
+                    'error_msg',
+                    'Você não possui projetos atribuídos para avaliar.'
+                );
+
+                return res.redirect(
+                    '/avaliador/dashboard'
+                );
+            }
+
+
+            // ------------------------------------------------
+            // PROJETOS INCOMPLETOS
+            // ------------------------------------------------
 
             const projetosNaoCompletos = [];
 
-            /*
-             * Cada projeto será analisado individualmente.
-             */
+
+            // =================================================
+            // VERIFICA CADA PROJETO INDIVIDUALMENTE
+            // =================================================
 
             for (
                 const projeto
                 of projetosAtribuidos
             ) {
 
+                // --------------------------------------------
+                // CRITÉRIOS DO PROJETO
+                // --------------------------------------------
+
                 const totalCriteriosProjeto =
-                    Array.isArray(
-                        projeto.criterios
-                    )
+                    Array.isArray(projeto.criterios)
                         ? projeto.criterios.length
                         : 0;
 
+
+                // --------------------------------------------
+                // BUSCA AVALIAÇÃO
+                // --------------------------------------------
+
                 const avaliacao =
                     await Avaliacao.findOne({
+
                         avaliador:
                             avaliadorData._id,
 
@@ -828,18 +1066,34 @@ router.post(
                             projeto.escolaId
                     });
 
-                /*
-                 * Projeto sem critérios.
-                 *
-                 * Consideramos completo caso exista
-                 * uma avaliação.
-                 */
 
-                if (
-                    totalCriteriosProjeto === 0
-                ) {
+                // --------------------------------------------
+                // CONTA CRITÉRIOS AVALIADOS
+                // --------------------------------------------
+
+                const criteriosAvaliados =
+                    avaliacao &&
+                    Array.isArray(avaliacao.itens)
+
+                        ? avaliacao.itens.filter(
+                            item =>
+                                item.nota !== undefined &&
+                                item.nota !== null &&
+                                item.nota >= 5 &&
+                                item.nota <= 10
+                        ).length
+
+                        : 0;
+
+
+                // --------------------------------------------
+                // PROJETO SEM CRITÉRIOS
+                // --------------------------------------------
+
+                if (totalCriteriosProjeto === 0) {
 
                     if (!avaliacao) {
+
                         projetosNaoCompletos.push(
                             projeto._id
                         );
@@ -848,34 +1102,13 @@ router.post(
                     continue;
                 }
 
-                /*
-                 * Quantidade de notas válidas.
-                 */
 
-                const notasValidas =
-                    avaliacao &&
-                    Array.isArray(
-                        avaliacao.itens
-                    )
-                        ? avaliacao.itens.filter(
-                            item =>
-                                item.nota !==
-                                    undefined &&
-                                item.nota !==
-                                    null &&
-                                item.nota >= 5 &&
-                                item.nota <= 10
-                        ).length
-                        : 0;
-
-                /*
-                 * O projeto só está completo se a quantidade
-                 * de notas for exatamente igual à quantidade
-                 * de critérios daquele projeto.
-                 */
+                // --------------------------------------------
+                // PROJETO COM CRITÉRIOS
+                // --------------------------------------------
 
                 if (
-                    notasValidas !==
+                    criteriosAvaliados !==
                     totalCriteriosProjeto
                 ) {
 
@@ -885,10 +1118,10 @@ router.post(
                 }
             }
 
-            /*
-             * Se houver projetos pendentes,
-             * informa ao avaliador.
-             */
+
+            // =================================================
+            // SE EXISTEM PROJETOS PENDENTES
+            // =================================================
 
             if (
                 projetosNaoCompletos.length > 0
@@ -897,23 +1130,22 @@ router.post(
                 const projetosTitles =
                     await Projeto.find({
                         _id: {
-                            $in:
-                                projetosNaoCompletos
+                            $in: projetosNaoCompletos
                         }
                     })
                     .select('titulo')
                     .lean();
 
+
                 const titles =
                     projetosTitles
-                        .map(
-                            p => p.titulo
-                        )
+                        .map(p => p.titulo)
                         .join(', ');
+
 
                 req.flash(
                     'error_msg',
-                    `Você precisa avaliar todos os critérios dos projetos atribuídos antes de finalizar. Projetos pendentes: ${titles}.`
+                    `Você precisa avaliar TODOS os critérios de TODOS os projetos atribuídos antes de finalizar. Projetos pendentes: ${titles}.`
                 );
 
                 return res.redirect(
@@ -921,47 +1153,48 @@ router.post(
                 );
             }
 
-            /*
-             * Todas as avaliações estão completas.
-             */
 
-            avaliadorData.ativo = false;
+            // =================================================
+            // TUDO COMPLETO
+            // =================================================
 
-            avaliadorData.statusAvaliacaoGeral =
-                true;
+            avaliadorCompleto.ativo = false;
 
-            await avaliadorData.save();
+            avaliadorCompleto.statusAvaliacaoGeral = true;
 
-            /*
-             * Encerra sessão.
-             */
+            await avaliadorCompleto.save();
 
-            req.session.destroy(
-                err => {
 
-                    if (err) {
+            // ------------------------------------------------
+            // ENCERRA SESSÃO
+            // ------------------------------------------------
 
-                        console.error(
-                            'Erro ao encerrar sessão do avaliador:',
-                            err
-                        );
+            req.session.destroy(err => {
 
-                        if (!res.headersSent) {
-                            return res.redirect(
-                                '/avaliador/login'
-                            );
-                        }
+                if (err) {
 
-                        return;
-                    }
+                    console.error(
+                        'Erro ao encerrar sessão do avaliador:',
+                        err
+                    );
 
                     if (!res.headersSent) {
-                        res.redirect(
-                            '/avaliador/agradecimento'
+                        return res.redirect(
+                            '/avaliador/login'
                         );
                     }
+
+                    return;
                 }
-            );
+
+
+                if (!res.headersSent) {
+
+                    return res.redirect(
+                        '/avaliador/agradecimento'
+                    );
+                }
+            });
 
         } catch (err) {
 
@@ -978,7 +1211,7 @@ router.post(
                     err.message
                 );
 
-                res.redirect(
+                return res.redirect(
                     '/avaliador/dashboard'
                 );
             }
@@ -1009,7 +1242,7 @@ router.get('/logout', (req, res) => {
                 'Você foi desconectado com sucesso.'
             );
 
-            res.redirect(
+            return res.redirect(
                 '/avaliador/login'
             );
         }
@@ -1025,15 +1258,13 @@ router.get('/agradecimento', (req, res) => {
 
     if (res.headersSent) return;
 
-    res.render(
-        'avaliador/agradecimento',
-        {
-            layout: 'layouts/public',
+    res.render('avaliador/agradecimento', {
 
-            titulo:
-                'Obrigado por sua participação'
-        }
-    );
+        layout: 'layouts/public',
+
+        titulo:
+            'Obrigado por sua participação'
+    });
 });
 
 
@@ -1047,27 +1278,27 @@ router.get(
 
         try {
 
-            const { pin } =
-                req.params;
+            const { pin } = req.params;
+
 
             const avaliador =
                 await Avaliador.findOne({
                     pin,
                     ativo: true
-                }).populate(
-                    'projetosAtribuidos'
-                );
+                }).populate('projetosAtribuidos');
+
 
             if (!avaliador) {
 
-                return res
-                    .status(404)
-                    .send(
-                        'PIN inválido ou avaliador desativado.'
-                    );
+                return res.status(404).send(
+                    'PIN inválido ou avaliador desativado.'
+                );
             }
 
+
+            // Define sessão
             req.session.avaliador = {
+
                 id:
                     avaliador._id,
 
@@ -1081,6 +1312,7 @@ router.get(
                     avaliador.feira.toString()
             };
 
+
             return res.redirect(
                 '/avaliador/dashboard'
             );
@@ -1092,11 +1324,9 @@ router.get(
                 err
             );
 
-            return res
-                .status(500)
-                .send(
-                    'Erro ao acessar o sistema.'
-                );
+            return res.status(500).send(
+                'Erro ao acessar o sistema.'
+            );
         }
     }
 );
@@ -1106,67 +1336,69 @@ router.get(
 // FEEDBACK
 // ============================================================
 
-router.post(
-    '/feedback',
-    async (req, res) => {
+router.post('/feedback', async (req, res) => {
 
-        try {
+    try {
 
-            const {
-                tipo,
+        const {
+            tipo,
+            mensagem,
+            categoria,
+            nome,
+            email
+        } = req.body;
+
+
+        const novoFeedback =
+            new Feedback({
+
+                tipo:
+                    tipo || 'Avaliador',
+
                 mensagem,
+
                 categoria,
-                nome,
-                email
-            } = req.body;
 
-            const novoFeedback =
-                new Feedback({
+                nome:
+                    nome?.trim() || '',
 
-                    tipo:
-                        tipo ||
-                        'Avaliador',
+                email:
+                    email?.trim() || ''
+            });
 
-                    mensagem,
 
-                    categoria,
+        await novoFeedback.save();
 
-                    nome:
-                        nome?.trim() || '',
 
-                    email:
-                        email?.trim() || ''
-                });
+        req.flash(
+            'success_msg',
+            'Feedback enviado com sucesso!'
+        );
 
-            await novoFeedback.save();
 
-            req.flash(
-                'success_msg',
-                'Feedback enviado com sucesso!'
-            );
+        return res.redirect(
+            '/avaliador/agradecimento'
+        );
 
-            res.redirect(
-                '/avaliador/agradecimento'
-            );
+    } catch (error) {
 
-        } catch (error) {
+        console.error(
+            'Erro ao enviar feedback:',
+            error
+        );
 
-            console.error(
-                'Erro ao enviar feedback:',
-                error
-            );
 
-            req.flash(
-                'error_msg',
-                'Ocorreu um erro ao enviar o feedback. Tente novamente.'
-            );
+        req.flash(
+            'error_msg',
+            'Ocorreu um erro ao enviar o feedback. Tente novamente.'
+        );
 
-            res.redirect(
-                '/avaliador/agradecimento'
-            );
-        }
+
+        return res.redirect(
+            '/avaliador/agradecimento'
+        );
     }
-);
+});
 
 
 module.exports = router;
