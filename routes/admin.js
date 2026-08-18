@@ -99,6 +99,332 @@ function formatarDataParaInput(dateString) {
     const day = String(date.getDate()).padStart(2, '0');
     return `${year}-${month}-${day}`;
 }
+// ===========================================
+// FUNÇÕES AUXILIARES - AVALIAÇÕES E PONTUAÇÃO
+// ===========================================
+
+/**
+ * Retorna o ID de um critério independentemente de ele
+ * estar populado ou ser apenas um ObjectId.
+ */
+function getCriterioId(criterio) {
+    if (!criterio) return null;
+
+    if (criterio._id) {
+        return String(criterio._id);
+    }
+
+    return String(criterio);
+}
+
+
+/**
+ * Retorna um Set contendo somente os IDs dos critérios
+ * configurados especificamente para o projeto.
+ *
+ * A fonte oficial dos critérios de um projeto é:
+ *
+ * projeto.criterios
+ */
+function getIdsCriteriosProjeto(projeto) {
+    const criterios = Array.isArray(projeto?.criterios)
+        ? projeto.criterios
+        : [];
+
+    return new Set(
+        criterios
+            .map(getCriterioId)
+            .filter(Boolean)
+    );
+}
+
+
+/**
+ * Retorna somente os itens válidos de uma avaliação:
+ *
+ * - o critério precisa pertencer ao projeto;
+ * - precisa possuir nota;
+ * - a nota precisa estar entre 5 e 10.
+ *
+ * Isso também protege os relatórios contra avaliações antigas
+ * que eventualmente tenham critérios que não pertencem mais
+ * ao projeto.
+ */
+function getItensValidosDaAvaliacao(avaliacao, projeto) {
+    const criteriosPermitidos = getIdsCriteriosProjeto(projeto);
+
+    const itens = Array.isArray(avaliacao?.itens)
+        ? avaliacao.itens
+        : [];
+
+    return itens.filter(item => {
+        if (!item || !item.criterio) {
+            return false;
+        }
+
+        const criterioId = String(item.criterio);
+
+        if (!criteriosPermitidos.has(criterioId)) {
+            return false;
+        }
+
+        const nota = Number(item.nota);
+
+        return (
+            item.nota !== undefined &&
+            item.nota !== null &&
+            item.nota !== '' &&
+            !Number.isNaN(nota) &&
+            nota >= 5 &&
+            nota <= 10
+        );
+    });
+}
+
+
+/**
+ * Verifica se UMA avaliação possui nota válida para TODOS
+ * os critérios configurados no projeto.
+ */
+function avaliacaoEstaCompleta(avaliacao, projeto) {
+    const criteriosProjeto = getIdsCriteriosProjeto(projeto);
+
+    // Projeto sem critérios configurados
+    if (criteriosProjeto.size === 0) {
+        return false;
+    }
+
+    if (!avaliacao) {
+        return false;
+    }
+
+    const itensValidos = getItensValidosDaAvaliacao(
+        avaliacao,
+        projeto
+    );
+
+    const criteriosAvaliados = new Set(
+        itensValidos.map(item => String(item.criterio))
+    );
+
+    return [...criteriosProjeto].every(
+        criterioId => criteriosAvaliados.has(criterioId)
+    );
+}
+
+
+/**
+ * Calcula o resultado de um projeto considerando:
+ *
+ * 1. somente projeto.criterios;
+ * 2. somente notas válidas desses critérios;
+ * 3. média de cada critério entre os avaliadores;
+ * 4. peso de cada critério;
+ * 5. média ponderada final.
+ *
+ * IMPORTANTE:
+ * projeto.criterios deve estar populado para que o peso
+ * dos critérios esteja disponível.
+ */
+function calcularResultadoProjeto(projeto, avaliacoesDoProjeto = []) {
+    const criterios = Array.isArray(projeto?.criterios)
+        ? projeto.criterios
+        : [];
+
+    const mediasCriterios = {};
+
+    let totalNotaPonderada = 0;
+    let totalPeso = 0;
+
+    for (const criterio of criterios) {
+        const criterioId = getCriterioId(criterio);
+
+        if (!criterioId) {
+            continue;
+        }
+
+        /*
+         * Como o cálculo precisa do peso, o critério deve estar
+         * populado. Se não estiver, usamos peso 1 como segurança,
+         * mas nossas rotas corrigidas irão popular os critérios.
+         */
+        const peso = Number(criterio?.peso) || 1;
+
+        const notas = [];
+
+        for (const avaliacao of avaliacoesDoProjeto) {
+            const itens = Array.isArray(avaliacao?.itens)
+                ? avaliacao.itens
+                : [];
+
+            for (const item of itens) {
+                if (
+                    String(item.criterio) === criterioId &&
+                    item.nota !== undefined &&
+                    item.nota !== null &&
+                    item.nota !== ''
+                ) {
+                    const nota = Number(item.nota);
+
+                    if (
+                        !Number.isNaN(nota) &&
+                        nota >= 5 &&
+                        nota <= 10
+                    ) {
+                        notas.push(nota);
+                    }
+                }
+            }
+        }
+
+        if (notas.length === 0) {
+            mediasCriterios[criterioId] = null;
+            continue;
+        }
+
+        const somaNotas = notas.reduce(
+            (soma, nota) => soma + nota,
+            0
+        );
+
+        const mediaCriterio =
+            somaNotas / notas.length;
+
+        mediasCriterios[criterioId] =
+            mediaCriterio;
+
+        totalNotaPonderada +=
+            mediaCriterio * peso;
+
+        totalPeso += peso;
+    }
+
+    const notaFinal =
+        totalPeso > 0
+            ? totalNotaPonderada / totalPeso
+            : null;
+
+    return {
+        mediasCriterios,
+        notaFinal,
+        totalPeso
+    };
+}
+
+
+/**
+ * Obtém os critérios de desempate pertencentes ao projeto.
+ *
+ * Ordem:
+ * 1 = maior prioridade
+ * 2 = segunda prioridade
+ * etc.
+ *
+ * ordemDesempate 0 não participa.
+ */
+function getCriteriosDesempateProjeto(projeto) {
+    const criterios = Array.isArray(projeto?.criterios)
+        ? projeto.criterios
+        : [];
+
+    return criterios
+        .filter(criterio =>
+            criterio &&
+            criterio._id &&
+            Number(criterio.ordemDesempate) > 0
+        )
+        .sort(
+            (a, b) =>
+                Number(a.ordemDesempate) -
+                Number(b.ordemDesempate)
+        );
+}
+
+
+/**
+ * Compara dois resultados para ranking.
+ *
+ * Primeiro:
+ * nota final.
+ *
+ * Em caso de empate:
+ * critérios configurados para desempate.
+ */
+function compararResultadosProjetos(a, b) {
+    const notaA = Number(a.notaFinal);
+    const notaB = Number(b.notaFinal);
+
+    const temNotaA = Number.isFinite(notaA);
+    const temNotaB = Number.isFinite(notaB);
+
+    if (temNotaA && !temNotaB) return -1;
+    if (!temNotaA && temNotaB) return 1;
+    if (!temNotaA && !temNotaB) return 0;
+
+    // Maior nota primeiro
+    if (notaA !== notaB) {
+        return notaB - notaA;
+    }
+
+    /*
+     * Para o desempate, usamos os critérios do projeto A.
+     *
+     * Projetos da mesma categoria normalmente terão os mesmos
+     * critérios de desempate. Mais à frente vamos reforçar isso
+     * na montagem do ranking.
+     */
+    const criteriosDesempate =
+        getCriteriosDesempateProjeto(a);
+
+    for (const criterio of criteriosDesempate) {
+        const criterioId =
+            String(criterio._id);
+
+        const mediaA =
+            Number(
+                a.mediasCriterios?.[
+                    criterioId
+                ]
+            );
+
+        const mediaB =
+            Number(
+                b.mediasCriterios?.[
+                    criterioId
+                ]
+            );
+
+        const temMediaA =
+            Number.isFinite(mediaA);
+
+        const temMediaB =
+            Number.isFinite(mediaB);
+
+        if (
+            temMediaA &&
+            temMediaB &&
+            mediaA !== mediaB
+        ) {
+            return mediaB - mediaA;
+        }
+
+        if (
+            temMediaA &&
+            !temMediaB
+        ) {
+            return -1;
+        }
+
+        if (
+            !temMediaA &&
+            temMediaB
+        ) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
 
 // Função para enviar e-mail de redefinição de PIN para avaliador
 async function sendResetPinEmail(avaliador) {
@@ -595,189 +921,579 @@ router.get('/dashboard', verificarAdminEscola, async (req, res) => {
             });
         }
 
-        let avaliacoesPorAvaliadorCount = {};
-        if (feiraAtual && avaliadoresFetched) {
-            avaliadoresFetched.forEach(av => {
-                const avaliacoesFeitas = avaliacoesFetched.filter(a => String(a.avaliador) === String(av._id)).length;
-                avaliacoesPorAvaliadorCount[av.nome] = avaliacoesFeitas;
-            });
-        }
+    // ============================================================
+// AVALIAÇÕES POR AVALIADOR
+// ============================================================
+//
+// Agora consideramos como "feita" somente uma avaliação
+// completa para aquele projeto, respeitando projeto.criterios.
+// ============================================================
 
-        let mediaAvaliacaoPorCriterio = {};
-        if (feiraAtual && avaliacoesFetched.length > 0) {
-            const criteriosMap = {};
-            avaliacoesFetched.forEach(avaliacao => {
-                const notasArray = avaliacao.notas || avaliacao.itens;
-                if (notasArray && Array.isArray(notasArray)) {
-                    notasArray.forEach(item => {
-                        if (item.criterio && item.nota !== undefined && item.nota !== null) {
-                            const criterioId = String(item.criterio);
-                            if (!criteriosMap[criterioId]) {
-                                criteriosMap[criterioId] = { sum: 0, count: 0 };
-                            }
-                            criteriosMap[criterioId].sum += parseFloat(item.nota);
-                            criteriosMap[criterioId].count++;
-                        }
-                    });
-                }
-            });
+let avaliacoesPorAvaliadorCount = {};
 
-            for (const id in criteriosMap) {
-                const criterio = criteriosOficiais.find(c => String(c._id) === id);
-                if (criterio) {
-                    mediaAvaliacaoPorCriterio[criterio.nome] = criteriosMap[id].sum / criteriosMap[id].count;
-                }
+if (feiraAtual && avaliadoresFetched) {
+
+    avaliadoresFetched.forEach(avaliador => {
+
+        const projetosAtribuidos = Array.isArray(avaliador.projetosAtribuidos)
+            ? avaliador.projetosAtribuidos
+            : [];
+
+        let totalAvaliacoesCompletas = 0;
+
+        for (const projetoAtribuido of projetosAtribuidos) {
+
+            const projetoId = String(
+                projetoAtribuido?._id || projetoAtribuido
+            );
+
+            const projeto = projetosFetched.find(
+                p => String(p._id) === projetoId
+            );
+
+            if (!projeto) {
+                continue;
+            }
+
+            const avaliacao = avaliacoesFetched.find(a =>
+                String(a.avaliador) === String(avaliador._id) &&
+                String(a.projeto) === String(projeto._id)
+            );
+
+            if (
+                avaliacao &&
+                avaliacaoEstaCompleta(avaliacao, projeto)
+            ) {
+                totalAvaliacoesCompletas++;
             }
         }
 
-        let statusProjetosCount = {
-            'Não Avaliado': 0,
-            'Em avaliação': 0,
-            'Avaliado': 0
-        };
-        // Métricas para o Dashboard Geral
-        let totalProjetos = 0;
-        let totalAvaliadores = 0;
-        let projetosAvaliadosCompletosCount = 0;
-        let projetosPendentesAvaliacaoCount = 0;
-        let mediaGeralAvaliacoes = 'N/A';
+        avaliacoesPorAvaliadorCount[avaliador.nome] =
+            totalAvaliacoesCompletas;
+    });
+}
 
-        if (feiraAtual) {
-            totalProjetos = await Projeto.countDocuments({ feira: feiraAtual._id, escolaId: escolaId }); // USANDO escolaId AQUI
-            totalAvaliadores = await Avaliador.countDocuments({ feira: feiraAtual._id, escolaId: escolaId }); // USANDO escolaId AQUI
 
-            let totalNotasGerais = 0;
-            let countNotasGerais = 0;
+// ============================================================
+// MÉDIA GERAL POR CRITÉRIO
+// ============================================================
+//
+// Calcula somente notas válidas e somente quando o critério
+// pertence ao projeto daquela avaliação.
+//
+// Isso impede avaliações antigas de contaminarem os números.
+// ============================================================
 
-            for (const projeto of projetosFetched) {
-                const avaliacoesDoProjeto = avaliacoesFetched.filter(a => a.projeto && String(a.projeto) === String(projeto._id));
-                const numAvaliadoresAtribuidos = avaliadoresFetched.filter(av => av.projetosAtribuidos && av.projetosAtribuidos.some(pa => String(pa) === String(projeto._id))).length;
+let mediaAvaliacaoPorCriterio = {};
 
-                let criteriosAvaliadosSet = new Set();
-                if (avaliacoesDoProjeto && Array.isArray(avaliacoesDoProjeto)) {
-                    avaliacoesDoProjeto.forEach(avaliacao => {
-                        const notasArray = avaliacao.notas || avaliacao.itens;
-                        if (notasArray && Array.isArray(notasArray)) {
-                            notasArray.forEach(item => {
-                                if (item.criterio && item.nota !== undefined && item.nota !== null) {
-                                    criteriosAvaliadosSet.add(String(item.criterio));
-                                    totalNotasGerais += parseFloat(item.nota);
-                                    countNotasGerais++;
-                                }
-                            });
-                        }
-                    });
-                }
-                const criteriosDoProjeto = projeto.criterios ? projeto.criterios.length : 0;
+if (
+    feiraAtual &&
+    avaliacoesFetched.length > 0
+) {
 
-                projeto.avaliacoesFeitas = avaliacoesDoProjeto.length;
-                projeto.totalAvaliadores = numAvaliadoresAtribuidos;
-                projeto.criteriosAvaliadosCount = criteriosAvaliadosSet.size;
-                projeto.totalCriterios = criteriosDoProjeto;
+    const criteriosMap = {};
 
-                if (projeto.avaliacoesFeitas === 0) {
-                    projeto.statusAvaliacao = 'Não Avaliado';
-                    statusProjetosCount['Não Avaliado']++;
-                } else if (projeto.avaliacoesFeitas < numAvaliadoresAtribuidos || criteriosAvaliadosSet.size < criteriosDoProjeto) {
-                    projeto.statusAvaliacao = 'Em avaliação';
-                    statusProjetosCount['Em avaliação']++;
-                    projetosPendentesAvaliacaoCount++;
-                } else {
-                    projeto.statusAvaliacao = 'Avaliado';
-                    statusProjetosCount['Avaliado']++;
-                    projetosAvaliadosCompletosCount++;
-                }
+    for (const avaliacao of avaliacoesFetched) {
 
-                let totalNotaPonderada = 0;
-                let totalPeso = 0;
+        const projeto = projetosFetched.find(
+            p =>
+                avaliacao.projeto &&
+                String(p._id) === String(avaliacao.projeto)
+        );
 
-                if (projeto.criterios && Array.isArray(projeto.criterios)) {
-                    for (const criterioProjeto of projeto.criterios) {
-                        const avaliacoesDoCriterio = avaliacoesDoProjeto.flatMap(avaliacao => {
-                            const notasArray = avaliacao.notas || avaliacao.itens;
-                            return (notasArray && Array.isArray(notasArray)) ? notasArray.filter(item => String(item.criterio) === String(criterioProjeto._id) && item.nota !== undefined && item.nota !== null) : [];
-                        });
-
-                        if (avaliacoesDoCriterio.length > 0) {
-                            const sumNotasCriterio = avaliacoesDoCriterio.reduce((acc, curr) => acc + parseFloat(curr.nota), 0);
-                            const mediaCriterio = sumNotasCriterio / avaliacoesDoCriterio.length;
-                            totalNotaPonderada += mediaCriterio * criterioProjeto.peso;
-                            totalPeso += criterioProjeto.peso;
-                        }
-                    }
-                }
-                projeto.notaFinal = totalPeso > 0 ? parseFloat(totalNotaPonderada / totalPeso).toFixed(2) : '0';
-            }
-
-            if (countNotasGerais > 0) {
-                mediaGeralAvaliacoes = parseFloat(totalNotasGerais / countNotasGerais).toFixed(2);
-            }
+        if (!projeto) {
+            continue;
         }
 
-        // Preparar relatorioFinalPorProjeto para o novo Dashboard Geral
-        const relatorioFinalPorProjeto = {};
-        for (const projeto of projetosFetched) {
-            const categoriaNome = projeto.categoria ? projeto.categoria.nome : 'Sem Categoria';
-            if (!relatorioFinalPorProjeto[categoriaNome]) {
-                relatorioFinalPorProjeto[categoriaNome] = [];
-            }
-            // Preencher mediasCriterios para cada projeto para a tabela
-            const mediasCriteriosProjeto = {};
-            const avaliacoesDoProjetoParaCriterios = avaliacoesFetched.filter(a => a.projeto && String(a.projeto) === String(projeto._id));
-            
-            for (const criterioOficial of criteriosOficiais) {
-                const notasDoCriterioParaEsteProjeto = avaliacoesDoProjetoParaCriterios.flatMap(avaliacao => {
-                    const notasArray = avaliacao.notas || avaliacao.itens;
-                    return (notasArray && Array.isArray(notasArray)) ? notasArray.filter(item =>
-                        String(item.criterio) === String(criterioOficial._id) &&
-                        item.nota !== undefined && item.nota !== null
-                    ) : [];
-                });
-                if (notasDoCriterioParaEsteProjeto.length > 0) {
-                    const sumNotas = notasDoCriterioParaEsteProjeto.reduce((acc, curr) => acc + parseFloat(curr.nota), 0);
-                    mediasCriteriosProjeto[String(criterioOficial._id)] = parseFloat(sumNotas / notasDoCriterioParaEsteProjeto.length).toFixed(2);
-                } else {
-                    mediasCriteriosProjeto[String(criterioOficial._id)] = 'N/A';
-                }
+        const itensValidos =
+            getItensValidosDaAvaliacao(
+                avaliacao,
+                projeto
+            );
+
+        for (const item of itensValidos) {
+
+            const criterioId =
+                String(item.criterio);
+
+            if (!criteriosMap[criterioId]) {
+
+                criteriosMap[criterioId] = {
+                    soma: 0,
+                    quantidade: 0
+                };
             }
 
+            criteriosMap[criterioId].soma +=
+                Number(item.nota);
 
-            relatorioFinalPorProjeto[categoriaNome].push({
-                titulo: projeto.titulo,
-                numAvaliacoes: projeto.avaliacoesFeitas,
-                mediasCriterios: mediasCriteriosProjeto, // Agora preenchido
-                mediaGeral: projeto.notaFinal
-            });
-        }
-
-        // Ordenar projetos dentro de cada categoria por média geral (notaFinal)
-        for (const categoria in relatorioFinalPorProjeto) {
-            relatorioFinalPorProjeto[categoria].sort((a, b) => {
-    const notaA = parseFloat(a.mediaGeral);
-    const notaB = parseFloat(b.mediaGeral);
-    if (isNaN(notaA) && isNaN(notaB)) return 0;
-    if (isNaN(notaA)) return 1;
-    if (isNaN(notaB)) return -1;
-    
-    // 1. Primeiro, comparar a média geral (notaFinal)
-    if (notaB !== notaA) return notaB - notaA;
-
-    // 2. Se empatar, comparar pela ordem dos critérios de desempate
-    for (const criterio of criteriosOficiais
-        .filter(c => c.ordemDesempate > 0)
-        .sort((x, y) => x.ordemDesempate - y.ordemDesempate)) {
-
-        const notaCriterioA = parseFloat(a.mediasCriterios[criterio._id.toString()]);
-        const notaCriterioB = parseFloat(b.mediasCriterios[criterio._id.toString()]);
-
-        if (!isNaN(notaCriterioA) && !isNaN(notaCriterioB) && notaCriterioA !== notaCriterioB) {
-            return notaCriterioB - notaCriterioA;
+            criteriosMap[criterioId].quantidade++;
         }
     }
-    return 0;
-});
 
+    for (const criterioId in criteriosMap) {
+
+        const criterio =
+            criteriosOficiais.find(
+                c =>
+                    String(c._id) ===
+                    String(criterioId)
+            );
+
+        if (!criterio) {
+            continue;
         }
+
+        const dados =
+            criteriosMap[criterioId];
+
+        if (dados.quantidade > 0) {
+
+            mediaAvaliacaoPorCriterio[
+                criterio.nome
+            ] =
+                dados.soma /
+                dados.quantidade;
+        }
+    }
+}
+
+
+// ============================================================
+// STATUS DOS PROJETOS
+// ============================================================
+
+let statusProjetosCount = {
+    'Não Avaliado': 0,
+    'Em avaliação': 0,
+    'Avaliado': 0
+};
+
+
+// ============================================================
+// MÉTRICAS DO DASHBOARD
+// ============================================================
+
+let totalProjetos = 0;
+let totalAvaliadores = 0;
+
+let projetosAvaliadosCompletosCount = 0;
+let projetosPendentesAvaliacaoCount = 0;
+
+let mediaGeralAvaliacoes = 'N/A';
+
+
+// ============================================================
+// PROCESSAMENTO DOS PROJETOS
+// ============================================================
+
+if (feiraAtual) {
+
+    totalProjetos =
+        projetosFetched.length;
+
+    totalAvaliadores =
+        avaliadoresFetched.length;
+
+
+    // --------------------------------------------------------
+    // Guardaremos as notas finais dos projetos para calcular
+    // a média geral da feira.
+    // --------------------------------------------------------
+
+    const notasFinaisProjetos = [];
+
+
+    for (const projeto of projetosFetched) {
+
+        // ====================================================
+        // AVALIADORES ATRIBUÍDOS A ESTE PROJETO
+        // ====================================================
+
+        const avaliadoresDoProjeto =
+            avaliadoresFetched.filter(avaliador => {
+
+                if (
+                    !Array.isArray(
+                        avaliador.projetosAtribuidos
+                    )
+                ) {
+                    return false;
+                }
+
+                return avaliador.projetosAtribuidos.some(
+                    projetoAtribuido => {
+
+                        const idProjetoAtribuido =
+                            String(
+                                projetoAtribuido?._id ||
+                                projetoAtribuido
+                            );
+
+                        return (
+                            idProjetoAtribuido ===
+                            String(projeto._id)
+                        );
+                    }
+                );
+            });
+
+
+        const numAvaliadoresAtribuidos =
+            avaliadoresDoProjeto.length;
+
+
+        // ====================================================
+        // AVALIAÇÕES DESTE PROJETO
+        // ====================================================
+
+        const avaliacoesDoProjeto =
+            avaliacoesFetched.filter(
+                avaliacao =>
+                    avaliacao.projeto &&
+                    String(avaliacao.projeto) ===
+                    String(projeto._id)
+            );
+
+
+        // ====================================================
+        // AVALIAÇÕES COMPLETAS
+        // ====================================================
+
+        const avaliacoesCompletas =
+            avaliacoesDoProjeto.filter(
+                avaliacao =>
+                    avaliacaoEstaCompleta(
+                        avaliacao,
+                        projeto
+                    )
+            );
+
+
+        // ====================================================
+        // CRITÉRIOS DO PROJETO
+        // ====================================================
+
+        const criteriosDoProjeto =
+            Array.isArray(projeto.criterios)
+                ? projeto.criterios
+                : [];
+
+        const totalCriteriosProjeto =
+            criteriosDoProjeto.length;
+
+
+        // ====================================================
+        // QUANTIDADE DE CRITÉRIOS JÁ AVALIADOS
+        //
+        // Aqui contamos somente os critérios que realmente
+        // pertencem ao projeto.
+        // ====================================================
+
+        const criteriosAvaliadosSet =
+            new Set();
+
+        for (const avaliacao of avaliacoesDoProjeto) {
+
+            const itensValidos =
+                getItensValidosDaAvaliacao(
+                    avaliacao,
+                    projeto
+                );
+
+            for (const item of itensValidos) {
+
+                criteriosAvaliadosSet.add(
+                    String(item.criterio)
+                );
+            }
+        }
+
+
+        // ====================================================
+        // CAMPOS USADOS PELA VIEW
+        // ====================================================
+
+        projeto.avaliacoesFeitas =
+            avaliacoesCompletas.length;
+
+        projeto.totalAvaliadores =
+            numAvaliadoresAtribuidos;
+
+        projeto.criteriosAvaliadosCount =
+            criteriosAvaliadosSet.size;
+
+        projeto.totalCriterios =
+            totalCriteriosProjeto;
+
+
+        // ====================================================
+        // STATUS DO PROJETO
+        // ====================================================
+        //
+        // Regra:
+        //
+        // Não Avaliado:
+        // nenhum avaliador completou a avaliação.
+        //
+        // Em avaliação:
+        // pelo menos uma avaliação existe/iniciou, mas ainda
+        // existem avaliadores atribuídos que não completaram.
+        //
+        // Avaliado:
+        // TODOS os avaliadores atribuídos concluíram TODOS os
+        // critérios daquele projeto.
+        // ====================================================
+
+        if (numAvaliadoresAtribuidos === 0) {
+
+            projeto.statusAvaliacao =
+                'Não Avaliado';
+
+            statusProjetosCount[
+                'Não Avaliado'
+            ]++;
+
+        } else if (
+            avaliacoesCompletas.length === 0 &&
+            avaliacoesDoProjeto.length === 0
+        ) {
+
+            projeto.statusAvaliacao =
+                'Não Avaliado';
+
+            statusProjetosCount[
+                'Não Avaliado'
+            ]++;
+
+        } else if (
+            avaliacoesCompletas.length <
+            numAvaliadoresAtribuidos
+        ) {
+
+            projeto.statusAvaliacao =
+                'Em avaliação';
+
+            statusProjetosCount[
+                'Em avaliação'
+            ]++;
+
+            projetosPendentesAvaliacaoCount++;
+
+        } else {
+
+            projeto.statusAvaliacao =
+                'Avaliado';
+
+            statusProjetosCount[
+                'Avaliado'
+            ]++;
+
+            projetosAvaliadosCompletosCount++;
+        }
+
+
+        // ====================================================
+        // CALCULAR NOTA FINAL
+        // ====================================================
+        //
+        // Usa a função centralizada criada no Bloco 1.
+        //
+        // Ela considera:
+        //
+        // - somente projeto.criterios
+        // - somente notas 5..10
+        // - média entre avaliadores
+        // - peso de cada critério
+        // ====================================================
+
+        const resultado =
+            calcularResultadoProjeto(
+                projeto,
+                avaliacoesDoProjeto
+            );
+
+
+        projeto.mediasCriterios =
+            resultado.mediasCriterios;
+
+
+        projeto.notaFinal =
+            resultado.notaFinal !== null
+                ? resultado.notaFinal.toFixed(2)
+                : 'N/A';
+
+
+        if (
+            resultado.notaFinal !== null &&
+            Number.isFinite(
+                resultado.notaFinal
+            )
+        ) {
+
+            notasFinaisProjetos.push(
+                resultado.notaFinal
+            );
+        }
+    }
+
+
+    // ========================================================
+    // MÉDIA GERAL DA FEIRA
+    // ========================================================
+    //
+    // Em vez de simplesmente misturar todas as notas individuais,
+    // calculamos a média das notas finais ponderadas dos projetos.
+    //
+    // Isso mantém a mesma regra de peso usada no ranking.
+    // ========================================================
+
+    if (
+        notasFinaisProjetos.length > 0
+    ) {
+
+        const somaNotasFinais =
+            notasFinaisProjetos.reduce(
+                (soma, nota) =>
+                    soma + nota,
+                0
+            );
+
+        mediaGeralAvaliacoes =
+            (
+                somaNotasFinais /
+                notasFinaisProjetos.length
+            ).toFixed(2);
+    }
+}
+
+
+// ============================================================
+// RELATÓRIO FINAL POR PROJETO - DASHBOARD
+// ============================================================
+//
+// Agora usamos projeto.mediasCriterios e projeto.notaFinal,
+// que foram calculados pela regra central.
+// ============================================================
+
+const relatorioFinalPorProjeto = {};
+
+for (const projeto of projetosFetched) {
+
+    const categoriaNome =
+        projeto.categoria
+            ? projeto.categoria.nome
+            : 'Sem Categoria';
+
+
+    if (
+        !relatorioFinalPorProjeto[
+            categoriaNome
+        ]
+    ) {
+
+        relatorioFinalPorProjeto[
+            categoriaNome
+        ] = [];
+    }
+
+
+    // --------------------------------------------------------
+    // Preparar médias apenas dos critérios do projeto
+    // --------------------------------------------------------
+
+    const mediasCriteriosProjeto = {};
+
+    if (
+        Array.isArray(projeto.criterios)
+    ) {
+
+        for (
+            const criterio
+            of projeto.criterios
+        ) {
+
+            const criterioId =
+                String(criterio._id);
+
+            const media =
+                projeto.mediasCriterios?.[
+                    criterioId
+                ];
+
+
+            mediasCriteriosProjeto[
+                criterioId
+            ] =
+                media !== undefined &&
+                media !== null &&
+                Number.isFinite(
+                    Number(media)
+                )
+                    ? Number(media).toFixed(2)
+                    : 'N/A';
+        }
+    }
+
+
+    relatorioFinalPorProjeto[
+        categoriaNome
+    ].push({
+
+        _id:
+            projeto._id,
+
+        titulo:
+            projeto.titulo,
+
+        categoria:
+            projeto.categoria,
+
+        criterios:
+            projeto.criterios,
+
+        numAvaliacoes:
+            projeto.avaliacoesFeitas,
+
+        totalAvaliadores:
+            projeto.totalAvaliadores,
+
+        statusAvaliacao:
+            projeto.statusAvaliacao,
+
+        mediasCriterios:
+            mediasCriteriosProjeto,
+
+        notaFinal:
+            projeto.notaFinal,
+
+        mediaGeral:
+            projeto.notaFinal
+    });
+}
+
+
+// ============================================================
+// ORDENAR RESULTADOS POR CATEGORIA
+// ============================================================
+//
+// 1º nota final
+// 2º critérios de desempate
+//
+// Cada projeto mantém somente seus critérios.
+// ============================================================
+
+for (
+    const categoria
+    in relatorioFinalPorProjeto
+) {
+
+    relatorioFinalPorProjeto[
+        categoria
+    ].sort(
+        compararResultadosProjetos
+    );
+}
         // --- FIM: PREPARAÇÃO DE DADOS PARA O DASHBOARD GERAL ---
 
         const activeTab = req.query.tab || 'dashboard-geral';
