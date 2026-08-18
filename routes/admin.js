@@ -100,6 +100,266 @@ function formatarDataParaInput(dateString) {
     return `${year}-${month}-${day}`;
 }
 
+// ===========================================
+// FUNÇÕES AUXILIARES - AVALIAÇÕES E PONTUAÇÃO
+// ===========================================
+/**
+* Retorna o ID de um critério independentemente de ele
+* estar populado ou ser apenas um ObjectId.
+*/
+function getCriterioId(criterio) {
+    if (!criterio) return null;
+    if (criterio._id) {
+        return String(criterio._id);
+    }
+    return String(criterio);
+}
+/**
+ * Retorna um Set contendo somente os IDs dos critérios
+ * configurados especificamente para o projeto.
+ *
+ * A fonte oficial dos critérios de um projeto é:
+ *
+ * projeto.criterios
+ */
+function getIdsCriteriosProjeto(projeto) {
+    const criterios = Array.isArray(projeto?.criterios)
+        ? projeto.criterios
+        : [];
+    return new Set(
+        criterios
+            .map(getCriterioId)
+            .filter(Boolean)
+    );
+}
+/**
+ * Retorna somente os itens válidos de uma avaliação:
+ * - o critério precisa pertencer ao projeto;
+ * - precisa possuir nota;
+ * - a nota precisa estar entre 5 e 10.
+ * Isso também protege os relatórios contra avaliações antigas
+ * que eventualmente tenham critérios que não pertencem mais
+ * ao projeto.
+ */
+function getItensValidosDaAvaliacao(avaliacao, projeto) {
+    const criteriosPermitidos = getIdsCriteriosProjeto(projeto);
+    const itens = Array.isArray(avaliacao?.itens)
+        ? avaliacao.itens
+        : [];
+    return itens.filter(item => {
+        if (!item || !item.criterio) {
+            return false;
+        }
+        const criterioId = String(item.criterio);
+        if (!criteriosPermitidos.has(criterioId)) {
+            return false;
+        }
+        const nota = Number(item.nota);
+        return (
+            item.nota !== undefined &&
+            item.nota !== null &&
+            item.nota !== '' &&
+            !Number.isNaN(nota) &&
+            nota >= 5 &&
+            nota <= 10
+        );
+    });
+}
+/**
+ * Verifica se UMA avaliação possui nota válida para TODOS
+ * os critérios configurados no projeto.
+ */
+function avaliacaoEstaCompleta(avaliacao, projeto) {
+    const criteriosProjeto = getIdsCriteriosProjeto(projeto);
+    // Projeto sem critérios configurados
+    if (criteriosProjeto.size === 0) {
+        return false;
+    }
+    if (!avaliacao) {
+        return false;
+    }
+    const itensValidos = getItensValidosDaAvaliacao(
+        avaliacao,
+        projeto
+    );
+    const criteriosAvaliados = new Set(
+        itensValidos.map(item => String(item.criterio))
+    );
+    return [...criteriosProjeto].every(
+        criterioId => criteriosAvaliados.has(criterioId)
+    );
+}
+/**
+ * Calcula o resultado de um projeto considerando:
+ * 1. somente projeto.criterios;
+ * 2. somente notas válidas desses critérios;
+ * 3. média de cada critério entre os avaliadores;
+ * 4. peso de cada critério;
+ * 5. média ponderada final.
+ * IMPORTANTE:
+ * projeto.criterios deve estar populado para que o peso
+ * dos critérios esteja disponível.
+ */
+function calcularResultadoProjeto(projeto, avaliacoesDoProjeto = []) {
+    const criterios = Array.isArray(projeto?.criterios)
+        ? projeto.criterios
+        : [];
+    const mediasCriterios = {};
+    let totalNotaPonderada = 0;
+    let totalPeso = 0;
+    for (const criterio of criterios) {
+        const criterioId = getCriterioId(criterio);
+        if (!criterioId) {
+            continue;
+        }
+        /*
+         * Como o cálculo precisa do peso, o critério deve estar
+         * populado. Se não estiver, usamos peso 1 como segurança,
+         * mas nossas rotas corrigidas irão popular os critérios.
+         */
+        const peso = Number(criterio?.peso) || 1;
+        const notas = [];
+        for (const avaliacao of avaliacoesDoProjeto) {
+            const itens = Array.isArray(avaliacao?.itens)
+                ? avaliacao.itens
+                : [];
+            for (const item of itens) {
+                if (
+                    String(item.criterio) === criterioId &&
+                    item.nota !== undefined &&
+                    item.nota !== null &&
+                    item.nota !== ''
+                ) {
+                    const nota = Number(item.nota);
+                    if (
+                        !Number.isNaN(nota) &&
+                        nota >= 5 &&
+                        nota <= 10
+                    ) {
+                        notas.push(nota);
+                    }
+                }
+            }
+        }
+        if (notas.length === 0) {
+            mediasCriterios[criterioId] = null;
+            continue;
+        }
+        const somaNotas = notas.reduce(
+            (soma, nota) => soma + nota,
+            0
+        );
+        const mediaCriterio =
+            somaNotas / notas.length;
+        mediasCriterios[criterioId] =
+            mediaCriterio;
+        totalNotaPonderada +=
+            mediaCriterio * peso;
+        totalPeso += peso;
+    }
+    const notaFinal =
+        totalPeso > 0
+            ? totalNotaPonderada / totalPeso
+            : null;
+    return {
+        mediasCriterios,
+        notaFinal,
+        totalPeso
+    };
+}
+/**
+ * Obtém os critérios de desempate pertencentes ao projeto.
+ * Ordem:
+ * 1 = maior prioridade
+ * 2 = segunda prioridade
+ * etc.
+ * ordemDesempate 0 não participa.
+ */
+function getCriteriosDesempateProjeto(projeto) {
+    const criterios = Array.isArray(projeto?.criterios)
+        ? projeto.criterios
+        : [];
+    return criterios
+        .filter(criterio =>
+            criterio &&
+            criterio._id &&
+            Number(criterio.ordemDesempate) > 0
+        )
+        .sort(
+            (a, b) =>
+                Number(a.ordemDesempate) -
+                Number(b.ordemDesempate)
+        );
+}
+/**
+ * Compara dois resultados para ranking.
+ * Primeiro:
+ * nota final.
+ * Em caso de empate:
+ * critérios configurados para desempate.
+ */
+function compararResultadosProjetos(a, b) {
+    const notaA = Number(a.notaFinal);
+    const notaB = Number(b.notaFinal);
+    const temNotaA = Number.isFinite(notaA);
+    const temNotaB = Number.isFinite(notaB);
+    if (temNotaA && !temNotaB) return -1;
+    if (!temNotaA && temNotaB) return 1;
+    if (!temNotaA && !temNotaB) return 0;
+    // Maior nota primeiro
+    if (notaA !== notaB) {
+        return notaB - notaA;
+    }
+    /*
+     * Para o desempate, usamos os critérios do projeto A.
+     * Projetos da mesma categoria normalmente terão os mesmos
+     * critérios de desempate. Mais à frente vamos reforçar isso
+     * na montagem do ranking.
+     */
+    const criteriosDesempate =
+        getCriteriosDesempateProjeto(a);
+    for (const criterio of criteriosDesempate) {
+        const criterioId =
+            String(criterio._id);
+        const mediaA =
+            Number(
+                a.mediasCriterios?.[
+                    criterioId
+                ]
+            );
+        const mediaB =
+            Number(
+                b.mediasCriterios?.[
+                    criterioId
+                ]
+            );
+        const temMediaA =
+            Number.isFinite(mediaA);
+        const temMediaB =
+            Number.isFinite(mediaB);
+        if (
+            temMediaA &&
+            temMediaB &&
+            mediaA !== mediaB
+        ) {
+            return mediaB - mediaA;
+        }
+        if (
+            temMediaA &&
+            !temMediaB
+        ) {
+            return -1;
+        }
+        if (
+            !temMediaA &&
+            temMediaB
+        ) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 // Função para enviar e-mail de redefinição de PIN para avaliador
 async function sendResetPinEmail(avaliador) {
   const html = `
